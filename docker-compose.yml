@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  # 1. Брокер сообщений Apache Kafka в режиме KRaft (без Zookeeper)
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lab6-kafka
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_LISTENERS: 'PLAINTEXT://kafka:9092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:29092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    networks:
+      - lab6-network
+
+  # 2. Веб-интерфейс Kafka UI (для просмотра топика orders-events и скриншотов в отчет)
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: lab6-kafka-ui
+    ports:
+      - "8085:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: lab6-kafka
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    depends_on:
+      - kafka
+    networks:
+      - lab6-network
+
+  # 3. Сервис заказов (Order Service: Write Side команды + Read Side запросы)
+  order-service:
+    build:
+      context: .
+      dockerfile: order_service/Dockerfile
+    container_name: lab6-order-service
+    ports:
+      - "8001:8001"
+    environment:
+      - PORT=8001
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC=orders-events
+      - ANALYTICS_SERVICE_URL=http://analytics-service:8002/internal/events
+    depends_on:
+      - kafka
+    networks:
+      - lab6-network
+
+  # 4. Сервис аналитики (Analytics Service: подписка на Kafka-топик и агрегация статистики)
+  analytics-service:
+    build:
+      context: .
+      dockerfile: analytics_service/Dockerfile
+    container_name: lab6-analytics-service
+    ports:
+      - "8002:8002"
+    environment:
+      - PORT=8002
+      - KAFKA_BOOTSTRAP_SERVERS=kafka:9092
+      - KAFKA_TOPIC=orders-events
+    depends_on:
+      - kafka
+    networks:
+      - lab6-network
+
+networks:
+  lab6-network:
+    driver: bridge
