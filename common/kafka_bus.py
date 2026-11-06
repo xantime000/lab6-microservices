@@ -71,6 +71,7 @@ class KafkaEventBus:
                 )
                 self._is_kafka_connected = True
                 self.logger.info(f"Producer успешно подключен к Apache Kafka (топик: {self.topic})!")
+                self._ensure_topic_exists()
                 return True
             except Exception as e:
                 self.logger.warning(f"Ожидание Kafka: {e}")
@@ -80,6 +81,23 @@ class KafkaEventBus:
                     self.logger.error("Превышено время ожидания Kafka. Перехожу в автономный режим.")
                     return False
         return False
+
+    def _ensure_topic_exists(self):
+        """Автоматическое создание топика при подключении, если он еще не существует"""
+        try:
+            from kafka.admin import KafkaAdminClient, NewTopic
+            admin = KafkaAdminClient(
+                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                request_timeout_ms=4000
+            )
+            existing = admin.list_topics()
+            if self.topic not in existing:
+                self.logger.info(f"Создание топика '{self.topic}' (партиций: 1, репликация: 1)...")
+                admin.create_topics([NewTopic(name=self.topic, num_partitions=1, replication_factor=1)])
+                self.logger.info(f"Топик '{self.topic}' успешно создан!")
+            admin.close()
+        except Exception as e:
+            self.logger.debug(f"Автосоздание топика: {e}")
 
     def publish(self, event_data: Dict[str, Any]):
         """Публикация доменного события в топик Kafka"""

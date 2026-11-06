@@ -23,10 +23,30 @@ services:
       KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
       KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
       CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
     networks:
       - lab6-network
 
-  # 2. Веб-интерфейс Kafka UI (для просмотра топика orders-events и скриншотов в отчет)
+  # 2. Автоматическое создание топика orders-events при старте кластера
+  init-kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: lab6-init-kafka
+    depends_on:
+      - kafka
+    entrypoint: [ '/bin/sh', '-c' ]
+    command: |
+      "
+      # Ожидание готовности Kafka брокера
+      cub kafka-ready -b kafka:9092 1 30
+      echo 'Создание топика orders-events...'
+      kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic orders-events --replication-factor 1 --partitions 1
+      echo 'Топики в Kafka:'
+      kafka-topics --bootstrap-server kafka:9092 --list
+      "
+    networks:
+      - lab6-network
+
+  # 3. Веб-интерфейс Kafka UI (для просмотра топика orders-events и скриншотов в отчет)
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: lab6-kafka-ui
