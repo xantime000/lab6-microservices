@@ -41,27 +41,23 @@ class KafkaEventBus:
         self._subscribers: List[Callable[[Dict[str, Any]], None]] = []
         self._lock = threading.Lock()
 
-    def connect(self, max_retries: int = 5, retry_interval: float = 2.0) -> bool:
-        """Подключение Producer к брокеру Kafka"""
-        try:
-            parts = KAFKA_BOOTSTRAP_SERVERS.split(",")[0].split(":")
-            host = parts[0]
-            port = int(parts[1]) if len(parts) > 1 else 9092
-            if not is_socket_open(host, port, timeout=0.3):
-                self.logger.info(f"Kafka на {KAFKA_BOOTSTRAP_SERVERS} не обнаружена. Включаю автономную шину событий.")
-                return False
-        except Exception:
-            pass
-
+    def connect(self, max_retries: int = 15, retry_interval: float = 2.0) -> bool:
+        """Подключение Producer к брокеру Kafka с повторными попытками"""
         try:
             from kafka import KafkaProducer
         except ImportError:
             self.logger.warning("Пакет kafka-python не установлен. Используется локальная шина.")
             return False
 
+        # Если локальный запуск на localhost и порт закрыт — не ждем долго
+        if KAFKA_BOOTSTRAP_SERVERS.startswith("localhost") or KAFKA_BOOTSTRAP_SERVERS.startswith("127.0.0.1"):
+            if not is_socket_open("127.0.0.1", 9092, timeout=0.2):
+                self.logger.info("Локальная Kafka на localhost:9092 не запущена. Используется встроенная шина.")
+                return False
+
         for attempt in range(1, max_retries + 1):
             try:
-                self.logger.info(f"Подключение Producer к Kafka ({KAFKA_BOOTSTRAP_SERVERS}), попытка {attempt}/{max_retries}...")
+                self.logger.info(f"Подключение к Kafka ({KAFKA_BOOTSTRAP_SERVERS}), попытка {attempt}/{max_retries}...")
                 self._producer = KafkaProducer(
                     bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
                     value_serializer=lambda v: json.dumps(v, ensure_ascii=False).encode("utf-8"),
@@ -74,11 +70,11 @@ class KafkaEventBus:
                 self._ensure_topic_exists()
                 return True
             except Exception as e:
-                self.logger.warning(f"Ожидание Kafka: {e}")
+                self.logger.warning(f"Ожидание запуска брокера Kafka ({attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
                     time.sleep(retry_interval)
                 else:
-                    self.logger.error("Превышено время ожидания Kafka. Перехожу в автономный режим.")
+                    self.logger.error("Превышено время ожидания Kafka. Включаю автономную шину событий.")
                     return False
         return False
 
@@ -105,6 +101,10 @@ class KafkaEventBus:
         order_id = event_data.get("orderId", "Unknown")
         self.logger.info(f"--> [KAFKA PUBLISH] Топик '{self.topic}' | Событие '{event_type}' для заказа '{order_id}'")
 
+        # Если при старте Kafka еще не была готова — пытаемся подключиться
+        if not self._is_kafka_connected:
+            self.connect(max_retries=2, retry_interval=1.0)
+
         if self._is_kafka_connected and self._producer:
             try:
                 future = self._producer.send(
@@ -125,30 +125,30 @@ class KafkaEventBus:
         with self._lock:
             self._subscribers.append(callback)
 
-        if self._is_kafka_connected:
-            thread = threading.Thread(
-                target=self._start_consumer_thread,
-                args=(callback, group_id or f"{self.service_name}-group"),
-                daemon=True
-            )
-            thread.start()
+        thread = threading.Thread(
+            target=self._start_consumer_thread,
+            args=(callback, group_id or f"{self.service_name}-group"),
+            daemon=True
+        )
+        thread.start()
 
     def _start_consumer_thread(self, callback: Callable[[Dict[str, Any]], None], group_id: str):
-        try:
-            from kafka import KafkaConsumer
-            self.logger.info(f"Запуск Consumer для группы '{group_id}' на топике '{self.topic}'...")
-            consumer = KafkaConsumer(
-                self.topic,
-                bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                group_id=group_id,
-                auto_offset_reset="earliest",
-                enable_auto_commit=True,
-                value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-                consumer_timeout_ms=1000
-            )
+        while True:
+            try:
+                from kafka import KafkaConsumer
+                self.logger.info(f"Запуск Consumer для группы '{group_id}' на топике '{self.topic}' ({KAFKA_BOOTSTRAP_SERVERS})...")
+                consumer = KafkaConsumer(
+                    self.topic,
+                    bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
+                    group_id=group_id,
+                    auto_offset_reset="earliest",
+                    enable_auto_commit=True,
+                    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+                    consumer_timeout_ms=1000
+                )
+                self.logger.info(f"Consumer для '{group_id}' успешно слушает топик '{self.topic}'!")
 
-            while True:
-                try:
+                while True:
                     for msg in consumer:
                         event_data = msg.value
                         self.logger.info(
@@ -156,10 +156,9 @@ class KafkaEventBus:
                             f"{event_data.get('eventType')}"
                         )
                         callback(event_data)
-                except Exception as loop_err:
-                    time.sleep(0.5)
-        except Exception as e:
-            self.logger.warning(f"Поток Kafka Consumer завершился: {e}")
+                    time.sleep(0.2)
+            except Exception as e:
+                time.sleep(2.0)
 
     def _notify_subscribers(self, event_data: Dict[str, Any]):
         with self._lock:
